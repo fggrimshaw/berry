@@ -24,6 +24,9 @@ export default class VersionCommand extends BaseCommand {
   @Command.Boolean(`-f,--force`)
   force: boolean = false;
 
+  @Command.Boolean(`-a,--all`)
+  all?: boolean = false
+
   static schema = yup.object().shape({
     strategy: yup.string().test({
       name: `strategy`,
@@ -118,8 +121,26 @@ export default class VersionCommand extends BaseCommand {
       }
     }
 
+    let workspaces = new Set([workspace]);
     const versionFile = await versionUtils.openVersionFile(project, {allowEmpty: true});
-    await versionFile.releases.set(workspace, releaseStrategy as any);
+
+    if (this.all) {
+      let baseWorkspaces = new Map([...versionFile.releaseRoots.keys()].map(workspace => [workspace.anchoredLocator.locatorHash, workspace]));
+      let newChanged = true;
+      while (newChanged) {
+        newChanged = false;
+        const dependentWorkspaces = versionUtils.getDependentWorkspaces(versionFile.project, baseWorkspaces);
+        if (dependentWorkspaces.size) {
+          newChanged = true;
+          dependentWorkspaces.forEach(workspace => baseWorkspaces.set(workspace.anchoredLocator.locatorHash, workspace));
+        }
+      }
+
+      workspaces = new Set([...baseWorkspaces.values()]);
+    }
+    for (let workspace of workspaces)
+      await versionFile.releases.set(workspace, releaseStrategy as any);
+
     await versionFile.saveAll();
 
     if (!deferred) {

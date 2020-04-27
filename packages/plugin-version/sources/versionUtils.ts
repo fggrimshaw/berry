@@ -1,8 +1,8 @@
-import {AllDependencies, execUtils, miscUtils, hashUtils, Workspace, structUtils, Project, Manifest, IdentHash, Report, MessageName, WorkspaceResolver} from '@yarnpkg/core';
-import {Filename, PortablePath, npath, ppath, xfs}                                                                                                      from '@yarnpkg/fslib';
-import {parseSyml, stringifySyml}                                                                                                                       from '@yarnpkg/parsers';
-import {UsageError}                                                                                                                                     from 'clipanion';
-import semver                                                                                                                                           from 'semver';
+import {AllDependencies, execUtils, miscUtils, hashUtils, Workspace, structUtils, Project, Manifest, IdentHash, Report, MessageName, WorkspaceResolver, LocatorHash} from '@yarnpkg/core';
+import {Filename, PortablePath, npath, ppath, xfs}                                                                                                                   from '@yarnpkg/fslib';
+import {parseSyml, stringifySyml}                                                                                                                                    from '@yarnpkg/parsers';
+import {UsageError}                                                                                                                                                  from 'clipanion';
+import semver                                                                                                                                                        from 'semver';
 
 // Basically we only support auto-upgrading the ranges that are very simple (^x.y.z, ~x.y.z, >=x.y.z, and of course x.y.z)
 const SUPPORTED_UPGRADE_REGEXP = /^(>=|[~^]|)(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(-(0|[1-9]\d*|\d*[a-zA-Z-][0-9a-zA-Z-]*)(\.(0|[1-9]\d*|\d*[a-zA-Z-][0-9a-zA-Z-]*))*)?(\+[0-9a-zA-Z-]+(\.[0-9a-zA-Z-]+)*)?$/;
@@ -383,6 +383,33 @@ export function getUndecidedDependentWorkspaces(versionFile: Pick<VersionFile, '
   }
 
   return undecided;
+}
+
+export function getDependentWorkspaces(project: Project, baseWorkspaces: Map<LocatorHash, Workspace>) {
+  const dependentWorkspaces = new Set<Workspace>();
+
+  for (const workspace of project.workspaces) {
+    // Let's assume that packages without versions don't need to see their version increased
+    if (workspace.manifest.version === null)
+      continue;
+
+    if (baseWorkspaces.has(workspace.anchoredLocator.locatorHash))
+      continue;
+
+    for (const dependencyType of Manifest.hardDependencies) {
+      for (const descriptor  of workspace.manifest.getForScope(dependencyType).values()) {
+        const matchingWorkspace = project.tryWorkspaceByDescriptor(descriptor);
+        if (matchingWorkspace === null)
+          continue;
+
+        if (baseWorkspaces.has(matchingWorkspace.anchoredLocator.locatorHash)) {
+          dependentWorkspaces.add(workspace);
+        }
+      }
+    }
+  }
+
+  return dependentWorkspaces;
 }
 
 export function suggestStrategy(from: string, to: string) {
