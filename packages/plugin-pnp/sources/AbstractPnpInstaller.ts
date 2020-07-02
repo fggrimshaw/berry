@@ -3,14 +3,17 @@ import {FetchResult, Descriptor, Locator, Package, BuildDirective}              
 import {miscUtils, structUtils}                                                                         from '@yarnpkg/core';
 import {FakeFS, PortablePath, ppath}                                                                    from '@yarnpkg/fslib';
 import {PackageRegistry, PnpSettings}                                                                   from '@yarnpkg/pnp';
-import mm                                                                                               from 'micromatch';
+
+export type AbstractInstallerOptions = LinkOptions & {
+  skipIncompatiblePackageLinking?: boolean;
+};
 
 export abstract class AbstractPnpInstaller implements Installer {
   private readonly packageRegistry: PackageRegistry = new Map();
 
   private readonly blacklistedPaths: Set<PortablePath> = new Set();
 
-  constructor(protected opts: LinkOptions) {
+  constructor(protected opts: AbstractInstallerOptions) {
     this.opts = opts;
   }
 
@@ -32,6 +35,20 @@ export abstract class AbstractPnpInstaller implements Installer {
    */
   abstract finalizeInstallWithPnp(pnpSettings: PnpSettings): Promise<Array<FinalizeInstallStatus> | void>;
 
+  private checkAndReportManifestIncompatibility(manifest: Manifest | null, pkg: Package): boolean {
+    if (manifest && !manifest.isCompatibleWithOS(process.platform)) {
+      this.opts.report.reportWarningOnce(MessageName.INCOMPATIBLE_OS, `${structUtils.prettyLocator(this.opts.project.configuration, pkg)} The platform ${process.platform} is incompatible with this module, ${this.opts.skipIncompatiblePackageLinking ? `linking` : `building`} skipped.`);
+      return false;
+    }
+
+    if (manifest && !manifest.isCompatibleWithCPU(process.arch)) {
+      this.opts.report.reportWarningOnce(MessageName.INCOMPATIBLE_CPU, `${structUtils.prettyLocator(this.opts.project.configuration, pkg)} The CPU architecture ${process.arch} is incompatible with this module, ${this.opts.skipIncompatiblePackageLinking ? `linking` : `building`} skipped.`);
+      return false;
+    }
+
+    return true;
+  }
+
   async installPackage(pkg: Package, fetchResult: FetchResult) {
     const key1 = structUtils.requirableIdent(pkg);
     const key2 = pkg.reference;
@@ -41,9 +58,12 @@ export abstract class AbstractPnpInstaller implements Installer {
       !structUtils.isVirtualLocator(pkg) &&
       !this.opts.project.tryWorkspaceByLocator(pkg);
 
-    const manifest = !hasVirtualInstances
+    const manifest = !hasVirtualInstances || this.opts.skipIncompatiblePackageLinking
       ? await Manifest.tryFind(fetchResult.prefixPath, {baseFs: fetchResult.packageFs})
       : null;
+    const isManifestCompatible = this.checkAndReportManifestIncompatibility(manifest, pkg);
+    if (this.opts.skipIncompatiblePackageLinking && !isManifestCompatible)
+      return {packageLocation: null, buildDirective: null};
 
     const buildScripts = !hasVirtualInstances
       ? await this.getBuildScripts(pkg, manifest, fetchResult)
@@ -70,7 +90,10 @@ export abstract class AbstractPnpInstaller implements Installer {
       ? await this.transformPackage(pkg, manifest, fetchResult, dependencyMeta, {hasBuildScripts: buildScripts.length > 0})
       : fetchResult.packageFs;
 
-    const packageRawLocation = ppath.resolve(packageFs.getRealPath(), ppath.relative(PortablePath.root, fetchResult.prefixPath));
+    if (ppath.isAbsolute(fetchResult.prefixPath))
+      throw new Error(`Assertion failed: Expected the prefix path (${fetchResult.prefixPath}) to be relative to the parent`);
+
+    const packageRawLocation = ppath.resolve(packageFs.getRealPath(), fetchResult.prefixPath);
 
     const packageLocation = this.normalizeDirectoryPath(packageRawLocation);
     const packageDependencies = new Map<string, string | [string, string] | null>();
@@ -100,7 +123,7 @@ export abstract class AbstractPnpInstaller implements Installer {
 
     return {
       packageLocation: packageRawLocation,
-      buildDirective: buildScripts.length > 0 ? buildScripts as BuildDirective[] : null,
+      buildDirective: buildScripts.length > 0 && isManifestCompatible ? buildScripts as Array<BuildDirective> : null,
     };
   }
 
@@ -131,18 +154,6 @@ export abstract class AbstractPnpInstaller implements Installer {
       [null, this.getPackageInformation(this.opts.project.topLevelWorkspace.anchoredLocator)],
     ]));
 
-    const buildIgnorePattern = (ignorePatterns: Array<string>) => {
-      if (ignorePatterns.length === 0)
-        return null;
-
-      return ignorePatterns.map(pattern => {
-        return `(${mm.makeRe(pattern, {
-          // @ts-ignore
-          windows: false,
-        }).source})`;
-      }).join(`|`);
-    };
-
     const pnpFallbackMode = this.opts.project.configuration.get(`pnpFallbackMode`);
 
     const blacklistedLocations = this.blacklistedPaths;
@@ -150,7 +161,7 @@ export abstract class AbstractPnpInstaller implements Installer {
     const enableTopLevelFallback = pnpFallbackMode !== `none`;
     const fallbackExclusionList = [];
     const fallbackPool = this.getPackageInformation(this.opts.project.topLevelWorkspace.anchoredLocator).packageDependencies;
-    const ignorePattern = buildIgnorePattern([`.vscode/pnpify/**`, ...this.opts.project.configuration.get(`pnpIgnorePatterns`)]);
+    const ignorePattern = miscUtils.buildIgnorePattern([`.yarn/sdks/**`, ...this.opts.project.configuration.get(`pnpIgnorePatterns`)]);
     const packageRegistry = this.packageRegistry;
     const shebang = this.opts.project.configuration.get(`pnpShebang`);
 
@@ -193,7 +204,7 @@ export abstract class AbstractPnpInstaller implements Installer {
     return miscUtils.getFactoryWithDefault(packageStore, normalizedPath, () => ({
       packageLocation: normalizedPath,
       packageDependencies: new Map(),
-      packagePeers: new Set(),
+      packagePeers: new Set<string>(),
       linkType: LinkType.SOFT,
       discardFromLookup: false,
     }));
@@ -202,7 +213,7 @@ export abstract class AbstractPnpInstaller implements Installer {
   private trimBlacklistedPackages() {
     for (const packageStore of this.packageRegistry.values()) {
       for (const [key2, packageInformation] of packageStore) {
-        if (this.blacklistedPaths.has(packageInformation.packageLocation)) {
+        if (packageInformation.packageLocation && this.blacklistedPaths.has(packageInformation.packageLocation)) {
           packageStore.delete(key2);
         }
       }
@@ -216,6 +227,6 @@ export abstract class AbstractPnpInstaller implements Installer {
       // Don't use ppath.join here, it ignores the `.`
       relativeFolder = `./${relativeFolder}` as PortablePath;
 
-    return relativeFolder.replace(/\/?$/, '/')  as PortablePath;
+    return relativeFolder.replace(/\/?$/, `/`)  as PortablePath;
   }
 }

@@ -11,6 +11,8 @@ import {Filename, FSPath, PortablePath}                                         
 
 const ZIP_FD = 0x80000000;
 
+const FILE_PARTS_REGEX = /.*?(?<!\/)\.zip(?=\/|$)/;
+
 export type ZipOpenFSOptions = {
   baseFs?: FakeFS<PortablePath>,
   filter?: RegExp | null,
@@ -59,9 +61,6 @@ export class ZipOpenFS extends BasePortableFakeFS {
     this.filter = filter;
     this.maxOpenFiles = maxOpenFiles;
     this.readOnlyArchives = readOnlyArchives;
-
-    this.isZip = new Set();
-    this.notZip = new Set();
   }
 
   getExtractHint(hints: ExtractHintOptions) {
@@ -88,6 +87,10 @@ export class ZipOpenFS extends BasePortableFakeFS {
         this.zipInstances.delete(path);
       }
     }
+  }
+
+  resolve(p: PortablePath) {
+    return this.baseFs.resolve(p);
   }
 
   private remapFd(zipFs: ZipFS, fd: number) {
@@ -654,7 +657,7 @@ export class ZipOpenFS extends BasePortableFakeFS {
     if (typeof p !== `string`)
       return await discard();
 
-    const normalizedP = this.pathUtils.normalize(this.pathUtils.resolve(PortablePath.root, p));
+    const normalizedP = this.resolve(p);
 
     const zipInfo = this.findZip(normalizedP);
     if (!zipInfo)
@@ -670,7 +673,7 @@ export class ZipOpenFS extends BasePortableFakeFS {
     if (typeof p !== `string`)
       return discard();
 
-    const normalizedP = this.pathUtils.normalize(this.pathUtils.resolve(PortablePath.root, p));
+    const normalizedP = this.resolve(p);
 
     const zipInfo = this.findZip(normalizedP);
     if (!zipInfo)
@@ -686,48 +689,36 @@ export class ZipOpenFS extends BasePortableFakeFS {
     if (this.filter && !this.filter.test(p))
       return null;
 
-    const parts = p.split(/\//g);
+    let filePath = `` as PortablePath;
 
-    for (let t = 2; t <= parts.length; ++t) {
-      const archivePath = parts.slice(0, t).join(`/`) as PortablePath;
+    while (true) {
+      const parts = FILE_PARTS_REGEX.exec(p.substr(filePath.length));
+      if (!parts)
+        return null;
 
-      if (this.notZip.has(archivePath))
-        continue;
+      filePath = this.pathUtils.join(filePath, parts[0] as PortablePath);
 
-      if (this.isZip.has(archivePath))
-        return {archivePath, subPath: this.pathUtils.resolve(PortablePath.root, parts.slice(t).join(`/`) as PortablePath)};
+      if (this.isZip.has(filePath) === false) {
+        if (this.notZip.has(filePath))
+          continue;
 
-      let realArchivePath = archivePath;
-      let stat;
-
-      while (true) {
         try {
-          stat = this.baseFs.lstatSync(realArchivePath);
-        } catch (error) {
+          if (!this.baseFs.lstatSync(filePath).isFile()) {
+            this.notZip.add(filePath);
+            continue;
+          }
+        } catch {
           return null;
         }
 
-        if (stat.isSymbolicLink()) {
-          realArchivePath = this.pathUtils.resolve(this.pathUtils.dirname(realArchivePath), this.baseFs.readlinkSync(realArchivePath));
-        } else {
-          break;
-        }
+        this.isZip.add(filePath);
       }
 
-      const isZip = stat.isFile() && this.pathUtils.extname(realArchivePath) === `.zip`;
-
-      if (isZip) {
-        this.isZip.add(archivePath);
-        return {archivePath, subPath: this.pathUtils.resolve(PortablePath.root, parts.slice(t).join(`/`) as PortablePath)};
-      } else {
-        this.notZip.add(archivePath);
-        if (stat.isFile()) {
-          return null;
-        }
-      }
+      return {
+        archivePath: filePath,
+        subPath: this.pathUtils.resolve(PortablePath.root, p.substr(filePath.length) as PortablePath),
+      };
     }
-
-    return null;
   }
 
   private limitOpenFiles(max: number) {
@@ -758,8 +749,16 @@ export class ZipOpenFS extends BasePortableFakeFS {
     if (this.zipInstances) {
       let zipFs = this.zipInstances.get(p);
 
-      if (!zipFs)
-        zipFs = new ZipFS(p, await getZipOptions());
+      if (!zipFs) {
+        const zipOptions = await getZipOptions();
+
+        // We need to recheck because concurrent getZipPromise calls may
+        // have instantiated the zip archive while we were waiting
+        zipFs = this.zipInstances.get(p);
+        if (!zipFs) {
+          zipFs = new ZipFS(p, zipOptions);
+        }
+      }
 
       // Removing then re-adding the field allows us to easily implement
       // a basic LRU garbage collection strategy

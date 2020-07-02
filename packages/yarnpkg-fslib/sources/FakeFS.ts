@@ -284,12 +284,13 @@ export abstract class FakeFS<P extends Path> {
     }
   }
 
-  copyPromise(destination: P, source: P, options?: {baseFs?: undefined, overwrite?: boolean}): Promise<void>;
-  copyPromise<P2 extends Path>(destination: P, source: P2, options: {baseFs: FakeFS<P2>, overwrite?: boolean}): Promise<void>;
-  async copyPromise<P2 extends Path>(destination: P, source: P2, {baseFs = this as any, overwrite = true}: {baseFs?: FakeFS<P2>, overwrite?: boolean} = {}) {
-    return await copyPromise(this, destination, baseFs, source, {overwrite});
+  copyPromise(destination: P, source: P, options?: {baseFs?: undefined, overwrite?: boolean, stableSort?: boolean, stableTime?: boolean}): Promise<void>;
+  copyPromise<P2 extends Path>(destination: P, source: P2, options: {baseFs: FakeFS<P2>, overwrite?: boolean, stableSort?: boolean, stableTime?: boolean}): Promise<void>;
+  async copyPromise<P2 extends Path>(destination: P, source: P2, {baseFs = this as any, overwrite = true, stableSort = false, stableTime = false}: {baseFs?: FakeFS<P2>, overwrite?: boolean, stableSort?: boolean, stableTime?: boolean} = {}) {
+    return await copyPromise(this, destination, baseFs, source, {overwrite, stableSort, stableTime});
   }
 
+  /** @deprecated Prefer using `copyPromise` instead */
   copySync(destination: P, source: P, options?: {baseFs?: undefined, overwrite?: boolean}): void;
   copySync<P2 extends Path>(destination: P, source: P2, options: {baseFs: FakeFS<P2>, overwrite?: boolean}): void;
   copySync<P2 extends Path>(destination: P, source: P2, {baseFs = this as any, overwrite = true}: {baseFs?: FakeFS<P2>, overwrite?: boolean} = {}) {
@@ -327,7 +328,7 @@ export abstract class FakeFS<P extends Path> {
   }
 
   async changeFilePromise(p: P, content: string, {automaticNewlines}: ChangeFileOptions = {}) {
-    let current = '';
+    let current = ``;
     try {
       current = await this.readFilePromise(p, `utf8`);
     } catch (error) {
@@ -345,7 +346,7 @@ export abstract class FakeFS<P extends Path> {
   }
 
   changeFileSync(p: P, content: string, {automaticNewlines = false}: ChangeFileOptions = {}) {
-    let current = '';
+    let current = ``;
     try {
       current = this.readFileSync(p, `utf8`);
     } catch (error) {
@@ -451,8 +452,12 @@ export abstract class FakeFS<P extends Path> {
     try {
       return await callback();
     } finally {
-      await this.closePromise(fd);
-      await this.unlinkPromise(lockPath);
+      try {
+        await this.unlinkPromise(lockPath);
+        await this.closePromise(fd);
+      } catch (error) {
+        // noop
+      }
     }
   }
 
@@ -513,15 +518,11 @@ export abstract class FakeFS<P extends Path> {
       this.utimesSync(p, stat.atime, stat.mtime);
     }
   }
-};
+}
 
 export abstract class BasePortableFakeFS extends FakeFS<PortablePath> {
   protected constructor() {
     super(ppath);
-  }
-
-  resolve(p: PortablePath) {
-    return this.pathUtils.resolve(PortablePath.root, p);
   }
 }
 

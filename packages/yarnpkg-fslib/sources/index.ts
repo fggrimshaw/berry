@@ -6,23 +6,24 @@ import {FakeFS}                                           from './FakeFS';
 import {NodeFS}                                           from './NodeFS';
 import {Filename, PortablePath, NativePath, npath, ppath} from './path';
 
-export {CreateReadStreamOptions}  from './FakeFS';
-export {CreateWriteStreamOptions} from './FakeFS';
-export {Dirent}                   from './FakeFS';
-export {MkdirOptions}             from './FakeFS';
-export {WatchOptions}             from './FakeFS';
-export {WatchCallback}            from './FakeFS';
-export {Watcher}                  from './FakeFS';
-export {WriteFileOptions}         from './FakeFS';
-export {normalizeLineEndings}     from './FakeFS';
-export {ExtractHintOptions}       from './FakeFS';
+export {normalizeLineEndings}          from './FakeFS';
+export type {CreateReadStreamOptions}  from './FakeFS';
+export type {CreateWriteStreamOptions} from './FakeFS';
+export type {Dirent, SymlinkType}      from './FakeFS';
+export type {MkdirOptions}             from './FakeFS';
+export type {WatchOptions}             from './FakeFS';
+export type {WatchCallback}            from './FakeFS';
+export type {Watcher}                  from './FakeFS';
+export type {WriteFileOptions}         from './FakeFS';
+export type {ExtractHintOptions}       from './FakeFS';
 
-export {DEFAULT_COMPRESSION_LEVEL} from './ZipFS';
-export {ZipCompression}            from './ZipFS';
+export {DEFAULT_COMPRESSION_LEVEL}     from './ZipFS';
+export type {ZipCompression}           from './ZipFS';
 
-export {FSPath, Path, PortablePath, NativePath, Filename} from './path';
-export {ParsedPath, PathUtils, FormatInputPathObject} from './path';
-export {npath, ppath, toFilename} from './path';
+export {PortablePath, Filename}                            from './path';
+export type {FSPath, Path, NativePath}                     from './path';
+export type {ParsedPath, PathUtils, FormatInputPathObject} from './path';
+export {npath, ppath, toFilename}                          from './path';
 
 export {AliasFS}                   from './AliasFS';
 export {FakeFS}                    from './FakeFS';
@@ -53,6 +54,7 @@ export function patchFs(patchedFs: typeof fs, fakeFs: FakeFS<NativePath>): void 
     `closeSync`,
     `copyFileSync`,
     `lstatSync`,
+    `lutimesSync`,
     `mkdirSync`,
     `openSync`,
     `readSync`,
@@ -79,6 +81,7 @@ export function patchFs(patchedFs: typeof fs, fakeFs: FakeFS<NativePath>): void 
     `closePromise`,
     `copyFilePromise`,
     `lstatPromise`,
+    `lutimesPromise`,
     `mkdirPromise`,
     `openPromise`,
     `readdirPromise`,
@@ -98,10 +101,8 @@ export function patchFs(patchedFs: typeof fs, fakeFs: FakeFS<NativePath>): void 
 
   const setupFn = (target: any, name: string, replacement: any) => {
     const orig = target[name];
-    if (typeof orig === `undefined`)
-      return;
-
     target[name] = replacement;
+
     if (typeof orig[promisify.custom] !== `undefined`) {
       replacement[promisify.custom] = orig[promisify.custom];
     }
@@ -115,7 +116,7 @@ export function patchFs(patchedFs: typeof fs, fakeFs: FakeFS<NativePath>): void 
     }
   });
 
-  setupFn(patchedFs, `exists`, (p: string, ...args: any[]) => {
+  setupFn(patchedFs, `exists`, (p: string, ...args: Array<any>) => {
     const hasCallback = typeof args[args.length - 1] === `function`;
     const callback = hasCallback ? args.pop() : () => {};
 
@@ -128,7 +129,7 @@ export function patchFs(patchedFs: typeof fs, fakeFs: FakeFS<NativePath>): void 
     });
   });
 
-  setupFn(patchedFs, `read`, (p: number, buffer: Buffer, ...args: any[]) => {
+  setupFn(patchedFs, `read`, (p: number, buffer: Buffer, ...args: Array<any>) => {
     const hasCallback = typeof args[args.length - 1] === `function`;
     const callback = hasCallback ? args.pop() : () => {};
 
@@ -142,28 +143,40 @@ export function patchFs(patchedFs: typeof fs, fakeFs: FakeFS<NativePath>): void 
   });
 
   for (const fnName of ASYNC_IMPLEMENTATIONS) {
-    const fakeImpl: Function = (fakeFs as any)[fnName].bind(fakeFs);
     const origName = fnName.replace(/Promise$/, ``);
+    if (typeof (patchedFs as any)[origName] === `undefined`)
+      continue;
 
-    setupFn(patchedFs, origName, (...args: Array<any>) => {
+    const fakeImpl: Function = (fakeFs as any)[fnName];
+    if (typeof fakeImpl === `undefined`)
+      continue;
+
+    const wrapper = (...args: Array<any>) => {
       const hasCallback = typeof args[args.length - 1] === `function`;
       const callback = hasCallback ? args.pop() : () => {};
 
       process.nextTick(() => {
-        fakeImpl(...args).then((result: any) => {
+        fakeImpl.apply(fakeFs, args).then((result: any) => {
           callback(null, result);
         }, (error: Error) => {
           callback(error);
         });
       });
-    });
+    };
+
+    setupFn(patchedFs, origName, wrapper);
   }
 
   for (const fnName of SYNC_IMPLEMENTATIONS) {
-    const fakeImpl: Function = (fakeFs as any)[fnName].bind(fakeFs);
     const origName = fnName;
+    if (typeof (patchedFs as any)[origName] === `undefined`)
+      continue;
 
-    setupFn(patchedFs, origName, fakeImpl);
+    const fakeImpl: Function = (fakeFs as any)[fnName];
+    if (typeof fakeImpl === `undefined`)
+      continue;
+
+    setupFn(patchedFs, origName, fakeImpl.bind(fakeFs));
   }
 
   patchedFs.realpathSync.native = patchedFs.realpathSync;

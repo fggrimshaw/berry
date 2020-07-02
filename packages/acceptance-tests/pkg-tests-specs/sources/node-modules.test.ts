@@ -1,10 +1,11 @@
 import {xfs, npath} from '@yarnpkg/fslib';
-import {fs}         from 'pkg-tests-core';
 
-const {writeFile, writeJson} = fs;
+const {
+  fs: {writeFile, writeJson},
+} = require(`pkg-tests-core`);
 
-describe('Node_Modules', () => {
-  it('should install one dependency',
+describe(`Node_Modules`, () => {
+  it(`should install one dependency`,
     makeTemporaryEnv(
       {
         dependencies: {
@@ -98,7 +99,7 @@ describe('Node_Modules', () => {
   test(`should not fail if target bin link does not exist`,
     makeTemporaryEnv(
       {
-        name: 'pkg',
+        name: `pkg`,
         bin: `dist/bin/index.js`,
       },
       async ({path, run, source}) => {
@@ -109,14 +110,14 @@ describe('Node_Modules', () => {
         await expect(run(`install`)).resolves.toBeTruthy();
         await expect(xfs.lstatPromise(npath.toPortablePath(`${path}/node_modules/.bin/pkg`))).rejects.toThrow();
 
-        await writeFile(npath.toPortablePath(`${path}/dist/bin/index.js`), '');
+        await writeFile(npath.toPortablePath(`${path}/dist/bin/index.js`), ``);
 
         await expect(run(`install`)).resolves.toBeTruthy();
         const stats = await xfs.lstatPromise(npath.toPortablePath(`${path}/node_modules/.bin/pkg`));
 
         expect(stats).toBeDefined();
 
-        if (process.platform !== 'win32') {
+        if (process.platform !== `win32`) {
           // Check that destination has 0o700 - execute for all permissions set
           expect(stats.mode & 0o700).toEqual(0o700);
         }
@@ -132,7 +133,7 @@ describe('Node_Modules', () => {
         },
       },
       async ({path, run, source}) => {
-        await writeFile(npath.toPortablePath(`${path}/../one-fixed-dep.local/abc.js`), '');
+        await writeFile(npath.toPortablePath(`${path}/../one-fixed-dep.local/abc.js`), ``);
 
         await writeFile(npath.toPortablePath(`${path}/.yarnrc.yml`), `
         nodeLinker: "node-modules"
@@ -156,12 +157,12 @@ describe('Node_Modules', () => {
       async ({path, run, source}) => {
         await writeJson(npath.toPortablePath(`${path}/../one-fixed-dep.local/package.json`), {
           name: `one-fixed-dep`,
-          bin: 'abc.js',
+          bin: `abc.js`,
           dependencies: {
             [`no-deps`]: `*`,
           },
         });
-        await writeFile(npath.toPortablePath(`${path}/../one-fixed-dep.local/abc.js`), '');
+        await writeFile(npath.toPortablePath(`${path}/../one-fixed-dep.local/abc.js`), ``);
 
         await writeFile(npath.toPortablePath(`${path}/.yarnrc.yml`), `
           nodeLinker: "node-modules"
@@ -209,7 +210,7 @@ describe('Node_Modules', () => {
     ),
   );
 
-  test(`should not recreated folders when package is updated`,
+  test(`should not recreate folders when package is updated`,
     makeTemporaryEnv(
       {
         private: true,
@@ -238,6 +239,92 @@ describe('Node_Modules', () => {
 
         expect(xfs.statSync(npath.toPortablePath(`${path}/node_modules`)).ino).toEqual(nmFolderInode);
         expect(xfs.statSync(npath.toPortablePath(`${path}/node_modules/no-deps`)).ino).toEqual(depFolderInode);
+      },
+    ),
+  );
+
+  test(`should skip linking incompatible package`,
+    makeTemporaryEnv(
+      {
+        private: true,
+        dependencies: {
+          dep: `file:./dep`,
+        },
+      },
+      async ({path, run, source}) => {
+        await writeFile(npath.toPortablePath(`${path}/.yarnrc.yml`), `
+        nodeLinker: "node-modules"
+      `);
+
+        await writeJson(npath.toPortablePath(`${path}/dep/package.json`), {
+          name: `dep`,
+          version: `1.0.0`,
+          os: [`!${process.platform}`],
+          scripts: {
+            postinstall: `echo 'Shall not be run'`,
+          },
+        });
+
+        const stdout = (await run(`install`)).stdout;
+
+        expect(stdout).not.toContain(`Shall not be run`);
+        expect(stdout).toMatch(new RegExp(`dep@file:./dep.*The platform ${process.platform} is incompatible with this module, linking skipped.`));
+
+        await expect(source(`require('dep')`)).rejects.toMatchObject({
+          externalException: {
+            code: `MODULE_NOT_FOUND`,
+          },
+        });
+      },
+    ),
+  );
+
+  test(`should support aliases`,
+    makeTemporaryEnv(
+      {
+        private: true,
+        workspaces: [`packages/*`],
+        dependencies: {
+          [`no-deps`]: `1.0.0`,
+          [`no-deps2`]: `npm:no-deps@2.0.0`,
+        },
+      },
+      async ({path, run, source}) => {
+        await writeFile(npath.toPortablePath(`${path}/.yarnrc.yml`), `
+          nodeLinker: "node-modules"
+        `);
+
+        await writeJson(npath.toPortablePath(`${path}/packages/workspace/package.json`), {
+          name: `workspace`,
+          version: `1.0.0`,
+          dependencies: {
+            [`no-deps`]: `npm:no-deps-bins@1.0.0`, // Should NOT be hoisted to the top
+            [`no-deps2`]: `npm:no-deps@2.0.0`,     // Should be hoisted to the top
+          },
+        });
+        await writeFile(`${path}/packages/workspace/index.js`,
+          `module.exports = require('./package.json');\n` +
+          `for (const key of ['dependencies', 'devDependencies', 'peerDependencies']) {\n` +
+          `    for (const dep of Object.keys(module.exports[key] || {})) {\n` +
+          `        module.exports[key][dep] = require(dep);\n` +
+          `    }}\n`);
+
+        await run(`install`);
+
+        await expect(source(`require('no-deps')`)).resolves.toEqual({
+          name: `no-deps`,
+          version: `1.0.0`,
+        });
+        await expect(source(`require('no-deps2')`)).resolves.toEqual({
+          name: `no-deps`,
+          version: `2.0.0`,
+        });
+        await expect(source(`require('workspace').dependencies['no-deps2'] === require('no-deps2')`)).resolves.toEqual(true);
+        await expect(source(`require('workspace').dependencies['no-deps']`)).resolves.toEqual({
+          bin: `./bin`,
+          name: `no-deps-bins`,
+          version: `1.0.0`,
+        });
       },
     ),
   );

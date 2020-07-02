@@ -12,7 +12,7 @@ title: "Release Workflow"
 >
 > To access this feature, first install the `version` plugin: `yarn plugin import version`
 
-When working with monorepos, a hard task often is to figure out which packages should receive a new version when starting a new release. Yarn offers a few tools that aim to make this workflow easier without need for third-party tools (although it's possible you may prefer the workflow offered by different implementations, of course!).
+When working with monorepos, a hard task often is to figure out which packages should receive a new version when starting a new release. Yarn offers a few tools that aim to make this workflow easier without the need for third-party tools (although it's possible you may prefer the workflow offered by different implementations, of course!).
 
 ```toc
 # This code block gets replaced with the Table of Contents
@@ -69,7 +69,7 @@ One critical problem remains, though: even if you use the independent mode, how 
 
 With Yarn's workflow, however, this all becomes very easy! Since the upgrades are kept in a file, and since this file is magically bound to a Git branch, it simply becomes a matter of committing the release folder - all expected releases will then become part of the project history until comes the time of `yarn version apply` - then Yarn will consume all the individual records, merge then (so that a PR requiring a minor will have higher precedence than the PR requiring a patch), and apply them simultaneously.
 
-As an added bonus, you'll even be able to review the package upgrades as part of the typical PR review! This will have the effect of delegating more power to your community while being able to ensure that everyone follow rules.
+As an added bonus, you'll even be able to review the package upgrades as part of the typical PR review! This will have the effect of delegating more power to your community while being able to ensure that everyone follows rules.
 
 ## Ensuring that versions are bumped (CI)
 
@@ -78,3 +78,5 @@ One problem with committing the deferred releases, however, is that it becomes i
 To solve this problem in an automated way, the `yarn version check` command appeared. When run, this command will figure out which packages changed and whether they are listed in the release definition file. If they aren't, an error will be thrown and - assuming you integrate this into a CI system such as the GitHub Actions - the PR author will be asked to fill out the release definition file.
 
 Writing this file can be tedious; fortunately `yarn version check` implements a very handy flag named `--interactive`. When set (`yarn version check --interactive`), Yarn will print a terminal interface that will summarize all the changed files, all the changed workspaces, all relevant dependent workspaces, and checkboxes for each entry allowing you to pick the release strategies you want to set for each workspace.
+
+The [`changesetIgnorePatterns`](/configuration/yarnrc#changesetIgnorePatterns) configuration option can be used to ignore files when checking which files have changed. It is useful for excluding files that don't affect the release process (e.g. test files).

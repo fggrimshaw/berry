@@ -60,6 +60,7 @@ export type InstallOptions = {
   report: Report,
   immutable?: boolean,
   lockfileOnly?: boolean,
+  persistProject?: boolean,
 };
 
 export class Project {
@@ -182,6 +183,7 @@ export class Project {
       // Protects against v1 lockfiles
       if (parsed.__metadata) {
         const lockfileVersion = parsed.__metadata.version;
+        const cacheKey = parsed.__metadata.cacheKey;
 
         for (const key of Object.keys(parsed)) {
           if (key === `__metadata`)
@@ -209,8 +211,13 @@ export class Project {
 
           const bin = manifest.bin;
 
-          if (data.checksum != null)
-            this.storedChecksums.set(locator.locatorHash, data.checksum);
+          if (data.checksum != null) {
+            const checksum = typeof cacheKey !== `undefined` && !data.checksum.includes(`/`)
+              ? `${cacheKey}/${data.checksum}`
+              : data.checksum;
+
+            this.storedChecksums.set(locator.locatorHash, checksum);
+          }
 
           if (lockfileVersion >= LOCKFILE_VERSION) {
             const pkg: Package = {...locator, version, languageName, linkType, dependencies, peerDependencies, dependenciesMeta, peerDependenciesMeta, bin};
@@ -410,9 +417,25 @@ export class Project {
     }
   }
 
+  forgetResolution(descriptor: Descriptor): void;
+  forgetResolution(locator: Locator): void;
+  forgetResolution(dataStructure: Descriptor | Locator): void {
+    for (const [descriptorHash, locatorHash] of this.storedResolutions) {
+      const doDescriptorHashesMatch = `descriptorHash` in dataStructure
+        && dataStructure.descriptorHash === descriptorHash;
+      const doLocatorHashesMatch = `locatorHash` in dataStructure
+        && dataStructure.locatorHash === locatorHash;
+
+      if (doDescriptorHashesMatch || doLocatorHashesMatch) {
+        this.storedDescriptors.delete(descriptorHash);
+        this.storedResolutions.delete(descriptorHash);
+        this.originalPackages.delete(locatorHash);
+      }
+    }
+  }
+
   forgetTransientResolutions() {
     const resolver = this.configuration.makeResolver();
-    const forgottenPackages = new Set();
 
     for (const pkg of this.originalPackages.values()) {
       let shouldPersistResolution: boolean;
@@ -423,15 +446,7 @@ export class Project {
       }
 
       if (!shouldPersistResolution) {
-        this.originalPackages.delete(pkg.locatorHash);
-        forgottenPackages.add(pkg.locatorHash);
-      }
-    }
-
-    for (const [descriptorHash, locatorHash] of this.storedResolutions) {
-      if (forgottenPackages.has(locatorHash)) {
-        this.storedResolutions.delete(descriptorHash);
-        this.storedDescriptors.delete(descriptorHash);
+        this.forgetResolution(pkg);
       }
     }
   }
@@ -948,35 +963,37 @@ export class Project {
 
     const limit = pLimit(FETCHER_CONCURRENCY);
 
-    await Promise.all(locatorHashes.map(locatorHash => limit(async () => {
-      const pkg = this.storedPackages.get(locatorHash);
-      if (!pkg)
-        throw new Error(`Assertion failed: The locator should have been registered`);
+    await report.startCacheReport(async () => {
+      await Promise.all(locatorHashes.map(locatorHash => limit(async () => {
+        const pkg = this.storedPackages.get(locatorHash);
+        if (!pkg)
+          throw new Error(`Assertion failed: The locator should have been registered`);
 
-      if (structUtils.isVirtualLocator(pkg))
-        return;
+        if (structUtils.isVirtualLocator(pkg))
+          return;
 
-      let fetchResult;
-      try {
-        fetchResult = await fetcher.fetch(pkg, fetcherOptions);
-      } catch (error) {
-        error.message = `${structUtils.prettyLocator(this.configuration, pkg)}: ${error.message}`;
-        report.reportExceptionOnce(error);
-        firstError = error;
-        return;
-      }
+        let fetchResult;
+        try {
+          fetchResult = await fetcher.fetch(pkg, fetcherOptions);
+        } catch (error) {
+          error.message = `${structUtils.prettyLocator(this.configuration, pkg)}: ${error.message}`;
+          report.reportExceptionOnce(error);
+          firstError = error;
+          return;
+        }
 
-      if (fetchResult.checksum)
-        this.storedChecksums.set(pkg.locatorHash, fetchResult.checksum);
-      else
-        this.storedChecksums.delete(pkg.locatorHash);
+        if (fetchResult.checksum)
+          this.storedChecksums.set(pkg.locatorHash, fetchResult.checksum);
+        else
+          this.storedChecksums.delete(pkg.locatorHash);
 
-      if (fetchResult.releaseFs) {
-        fetchResult.releaseFs();
-      }
-    }).finally(() => {
-      progress.tick();
-    })));
+        if (fetchResult.releaseFs) {
+          fetchResult.releaseFs();
+        }
+      }).finally(() => {
+        progress.tick();
+      })));
+    });
 
     if (firstError) {
       throw firstError;
@@ -985,7 +1002,7 @@ export class Project {
 
   async linkEverything({cache, report, fetcher: optFetcher}: InstallOptions) {
     const fetcher = optFetcher || this.configuration.makeFetcher();
-    const fetcherOptions = {checksums: this.storedChecksums, project: this, cache, fetcher, report};
+    const fetcherOptions = {checksums: this.storedChecksums, project: this, cache, fetcher, report, skipIntegrityCheck: true};
 
     const linkers = this.configuration.getLinkers();
     const linkerOptions = {project: this, report};
@@ -995,8 +1012,8 @@ export class Project {
     }));
 
     const packageLinkers: Map<LocatorHash, Linker> = new Map();
-    const packageLocations: Map<LocatorHash, PortablePath> = new Map();
-    const packageBuildDirectives: Map<LocatorHash, { directives: BuildDirective[], buildLocations: PortablePath[] }> = new Map();
+    const packageLocations: Map<LocatorHash, PortablePath | null> = new Map();
+    const packageBuildDirectives: Map<LocatorHash, { directives: Array<BuildDirective>, buildLocations: Array<PortablePath> }> = new Map();
 
     // Step 1: Installing the packages on the disk
 
@@ -1055,7 +1072,7 @@ export class Project {
         packageLinkers.set(pkg.locatorHash, linker);
         packageLocations.set(pkg.locatorHash, installStatus.packageLocation);
 
-        if (installStatus.buildDirective) {
+        if (installStatus.buildDirective && installStatus.packageLocation) {
           packageBuildDirectives.set(pkg.locatorHash, {
             directives: installStatus.buildDirective,
             buildLocations: [installStatus.packageLocation],
@@ -1077,7 +1094,7 @@ export class Project {
 
       const linkPackage = async (packageLinker: Linker, installer: Installer) => {
         const packageLocation = packageLocations.get(pkg.locatorHash);
-        if (!packageLocation)
+        if (typeof packageLocation === `undefined`)
           throw new Error(`Assertion failed: The package (${structUtils.prettyLocator(this.configuration, pkg)}) should have been registered`);
 
         const internalDependencies = [];
@@ -1101,14 +1118,18 @@ export class Project {
           const isWorkspaceDependency = dependencyLinker === null;
 
           if (dependencyLinker === packageLinker || isWorkspace || isWorkspaceDependency) {
-            internalDependencies.push([descriptor, dependency] as [Descriptor, Locator]);
-          } else {
+            if (packageLocations.get(dependency.locatorHash) !== null) {
+              internalDependencies.push([descriptor, dependency] as [Descriptor, Locator]);
+            }
+          } else if (packageLocation !== null) {
             const externalEntry = miscUtils.getArrayWithDefault(externalDependents, resolution);
             externalEntry.push(packageLocation);
           }
         }
 
-        await installer.attachInternalDependencies(pkg, internalDependencies);
+        if (packageLocation !== null) {
+          await installer.attachInternalDependencies(pkg, internalDependencies);
+        }
       };
 
       if (isWorkspace) {
@@ -1220,7 +1241,7 @@ export class Project {
       return hash;
     };
 
-    const getBuildHash = (locator: Locator, buildLocations: PortablePath[]) => {
+    const getBuildHash = (locator: Locator, buildLocations: Array<PortablePath>) => {
       const builder = createHash(`sha512`);
 
       builder.update(globalHash);
@@ -1328,6 +1349,9 @@ export class Project {
                   exitCode = 1;
                 }
 
+                stdout.end();
+                stderr.end();
+
                 if (exitCode === 0) {
                   nextBState.set(pkg.locatorHash, buildHash);
                   return true;
@@ -1395,8 +1419,8 @@ export class Project {
     await this.configuration.triggerHook(hooks => {
       return hooks.validateProject;
     }, this, {
-      reportWarning: (name: MessageName, text:string) => validationWarnings.push({name, text}),
-      reportError: (name: MessageName, text:string) => validationErrors.push({name, text}),
+      reportWarning: (name: MessageName, text: string) => validationWarnings.push({name, text}),
+      reportError: (name: MessageName, text: string) => validationErrors.push({name, text}),
     });
 
     const problemCount = validationWarnings.length + validationErrors.length;
@@ -1456,10 +1480,14 @@ export class Project {
 
     await opts.report.startTimerPromise(`Fetch step`, async () => {
       await this.fetchEverything(opts);
-      await this.cacheCleanup(opts);
+
+      if (typeof opts.persistProject === `undefined` || opts.persistProject) {
+        await this.cacheCleanup(opts);
+      }
     });
 
-    await this.persist();
+    if (typeof opts.persistProject === `undefined` || opts.persistProject)
+      await this.persist();
 
     await opts.report.startTimerPromise(`Link step`, async () => {
       await this.linkEverything(opts);
@@ -1487,7 +1515,7 @@ export class Project {
 
     const optimizedLockfile: {[key: string]: any} = {};
 
-    optimizedLockfile[`__metadata`] = {
+    optimizedLockfile.__metadata = {
       version: LOCKFILE_VERSION,
     };
 
@@ -1530,6 +1558,26 @@ export class Project {
 
       manifest.bin = new Map(pkg.bin);
 
+      let entryChecksum: string | undefined;
+      const checksum = this.storedChecksums.get(pkg.locatorHash);
+      if (typeof checksum !== `undefined`) {
+        const cacheKeyIndex = checksum.indexOf(`/`);
+        if (cacheKeyIndex === -1)
+          throw new Error(`Assertion failed: Expecte the checksum to reference its cache key`);
+
+        const cacheKey = checksum.slice(0, cacheKeyIndex);
+        const hash = checksum.slice(cacheKeyIndex + 1);
+
+        if (typeof optimizedLockfile.__metadata.cacheKey === `undefined`)
+          optimizedLockfile.__metadata.cacheKey = cacheKey;
+
+        if (cacheKey === optimizedLockfile.__metadata.cacheKey) {
+          entryChecksum = hash;
+        } else {
+          entryChecksum = checksum;
+        }
+      }
+
       optimizedLockfile[key] = {
         ...manifest.exportTo({}, {
           compatibilityMode: false,
@@ -1538,7 +1586,7 @@ export class Project {
         linkType: pkg.linkType.toLowerCase(),
 
         resolution: structUtils.stringifyLocator(pkg),
-        checksum: this.storedChecksums.get(pkg.locatorHash),
+        checksum: entryChecksum,
       };
     }
 
@@ -1572,14 +1620,18 @@ export class Project {
 
   async restoreInstallState() {
     const installStatePath = this.configuration.get<PortablePath>(`installStatePath`);
-    if (!xfs.existsSync(installStatePath))
-      return await this.applyLightResolution();
+    if (!xfs.existsSync(installStatePath)) {
+      await this.applyLightResolution();
+      return;
+    }
 
     const serializedState = await xfs.readFilePromise(installStatePath);
     const installState = v8.deserialize(await gunzip(serializedState) as Buffer);
 
-    if (installState.lockFileChecksum !== this.lockFileChecksum)
-      return await this.applyLightResolution();
+    if (installState.lockFileChecksum !== this.lockFileChecksum) {
+      await this.applyLightResolution();
+      return;
+    }
 
     Object.assign(this, installState);
 
@@ -1928,46 +1980,61 @@ function applyVirtualResolutionMutations({
     for (const fn of [...firstPass, ...secondPass])
       fn();
 
-    for (const [physicalLocator, virtualDescriptor, virtualPackage] of newVirtualInstances) {
-      const otherVirtualInstances = miscUtils.getMapWithDefault(allVirtualInstances, physicalLocator.locatorHash);
+    let stable: boolean;
+    do {
+      stable = true;
 
-      // We take all the dependencies from the new virtual instance and
-      // generate a hash from it. By checking if this hash is already
-      // registered, we know whether we can trim the new version.
-      const dependencyHash = hashUtils.makeHash(...[...virtualPackage.dependencies.values()].map(descriptor => {
-        const resolution = descriptor.range !== `missing:`
-          ? allResolutions.get(descriptor.descriptorHash)
-          : `missing:`;
-
-        if (typeof resolution === `undefined`)
-          throw new Error(`Assertion failed: Expected the resolution to have been registered`);
-
-        return resolution;
-      }));
-
-      const masterDescriptor = otherVirtualInstances.get(dependencyHash);
-      if (typeof masterDescriptor === `undefined`) {
-        otherVirtualInstances.set(dependencyHash, virtualDescriptor);
-        continue;
-      }
-
-      allPackages.delete(virtualPackage.locatorHash);
-      allDescriptors.delete(virtualDescriptor.descriptorHash);
-      allResolutions.delete(virtualDescriptor.descriptorHash);
-
-      accessibleLocators.delete(virtualPackage.locatorHash);
-
-      const dependents = allVirtualDependents.get(virtualDescriptor.descriptorHash) || [];
-      const allDependents = [parentPackage.locatorHash, ...dependents];
-
-      for (const dependent of allDependents) {
-        const pkg = allPackages.get(dependent);
-        if (typeof pkg === `undefined`)
+      for (const [physicalLocator, virtualDescriptor, virtualPackage] of newVirtualInstances) {
+        if (!allPackages.has(virtualPackage.locatorHash))
           continue;
 
-        pkg.dependencies.set(virtualDescriptor.identHash, masterDescriptor);
+        const otherVirtualInstances = miscUtils.getMapWithDefault(allVirtualInstances, physicalLocator.locatorHash);
+
+        // We take all the dependencies from the new virtual instance and
+        // generate a hash from it. By checking if this hash is already
+        // registered, we know whether we can trim the new version.
+        const dependencyHash = hashUtils.makeHash(...[...virtualPackage.dependencies.values()].map(descriptor => {
+          const resolution = descriptor.range !== `missing:`
+            ? allResolutions.get(descriptor.descriptorHash)
+            : `missing:`;
+
+          if (typeof resolution === `undefined`)
+            throw new Error(`Assertion failed: Expected the resolution for ${structUtils.prettyDescriptor(project.configuration, descriptor)} to have been registered`);
+
+          return resolution;
+        }));
+
+        const masterDescriptor = otherVirtualInstances.get(dependencyHash);
+        if (typeof masterDescriptor === `undefined`) {
+          otherVirtualInstances.set(dependencyHash, virtualDescriptor);
+          continue;
+        }
+
+        // Since we're applying multiple pass, we might have already registered
+        // ourselves as the "master" descriptor in the previous pass.
+        if (masterDescriptor === virtualDescriptor)
+          continue;
+
+        stable = false;
+
+        allPackages.delete(virtualPackage.locatorHash);
+        allDescriptors.delete(virtualDescriptor.descriptorHash);
+        allResolutions.delete(virtualDescriptor.descriptorHash);
+
+        accessibleLocators.delete(virtualPackage.locatorHash);
+
+        const dependents = allVirtualDependents.get(virtualDescriptor.descriptorHash) || [];
+        const allDependents = [parentPackage.locatorHash, ...dependents];
+
+        for (const dependent of allDependents) {
+          const pkg = allPackages.get(dependent);
+          if (typeof pkg === `undefined`)
+            continue;
+
+          pkg.dependencies.set(virtualDescriptor.identHash, masterDescriptor);
+        }
       }
-    }
+    } while (!stable);
 
     for (const fn of [...thirdPass, ...fourthPass]) {
       fn();

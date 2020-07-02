@@ -35,6 +35,30 @@ Its documentation and usage can be found on GitHub: [yarnpkg/berry/blob/master/p
 
 ## Frequently Asked Questions
 
+### Can I install a workspace of a project when using the `git:` protocol?
+
+Yes! Yarn supports workspaces even through git dependencies, using the following syntax:
+
+```json
+{
+  "dependencies": {
+    "my-pkg": "org/app#workspace=my-pkg"
+  }
+}
+```
+
+You can even combine it with the branch selectors:
+
+```json
+{
+  "dependencies": {
+    "my-pkg": "org/app#head=next&workspace=my-pkg"
+  }
+}
+```
+
+> **Note:** For this workflow to work, make sure that each individual workspaces can be built just by running `yarn install && yarn pack` into each individual workspace. In particular, avoid third-party release scripts unless they use `yarn pack` under the hood.
+
 ### Why can't I add dependencies through the `patch:` protocol?
 
 A Yarn install is split across multiple steps (described [here](/advanced/architecture#install-architecture)). Most importantly, we first fully resolve the dependency tree, and only then do we download the packages from their remote sources. Since patches occur during this second step, by the time we inject the new dependencies it's already too late as the dependency tree has already been frozen.
@@ -66,8 +90,8 @@ Enter the `link:` protocol! Through it, you directly instruct the package manage
 
 ### What's the difference between `link:` and `portal:`?
 
-The `link:` protocol is meant to link a package name to a folder on the disk - any folder. For example one perfect use case for the `link:` protocol is to map your `src` folder to a clearer name that you can then use from your Node applications without having to use relative paths (for example you could link `my-app` to `link:./src` so that you can call `require('my-app')` from any file within your application).
+The `link:` protocol is meant to link a package name to a folder on the disk - any folder. For example, one perfect use case for the `link:` protocol is to map your `src` folder to a clearer name that you can then use from your Node applications without having to use relative paths (for example you could link `my-app` to `link:./src` so that you can call `require('my-app')` from any file within your application).
 
-Because such destination folders typically don't contain `package.json`, the `link:` protocol doesn't even try to read them. It can cause problems when you want to link an identifier to a different *package* on the disk (similar to what `yarn link` does), because then the transitive dependencies aren't resolved.
+Because such destination folders typically don't contain `package.json`, the `link:` protocol doesn't even try to read them. It can cause problems when you want to link an identifier to a different *package* on the disk (similar to what `yarn link` does) because then the transitive dependencies aren't resolved.
 
 In order to solve this use case, the new `portal:` protocol available in the v2 opens a portal to any package located on your disk. Because portals are meant to only target packages they can leverage the information from the `package.json` files listed within their targets to properly resolve transitive dependencies.

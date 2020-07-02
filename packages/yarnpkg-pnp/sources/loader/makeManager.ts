@@ -33,7 +33,9 @@ export function makeManager(pnpapi: PnpApi, opts: MakeManagerOptions) {
 
     // @ts-ignore
     const module = new Module(nativePath, null);
+    // @ts-ignore
     module.load(nativePath);
+
     return module.exports;
   }
 
@@ -66,20 +68,50 @@ export function makeManager(pnpapi: PnpApi, opts: MakeManagerOptions) {
     return apiEntry;
   }
 
-  function findApiPathFor(modulePath: NativePath) {
+  const findApiPathCache = new Map<PortablePath, PortablePath | null>();
+
+  function addToCache(start: PortablePath, end: PortablePath, target: PortablePath | null) {
     let curr: PortablePath;
-    let next = npath.toPortablePath(modulePath);
+    let next = start;
+
+    do {
+      curr = next;
+      findApiPathCache.set(curr, target);
+      next = ppath.dirname(curr);
+    } while (curr !== end);
+  }
+
+  function findApiPathFor(modulePath: NativePath) {
+    const start = ppath.resolve(npath.toPortablePath(modulePath));
+
+    let curr: PortablePath;
+    let next = start;
 
     do {
       curr = next;
 
+      const cached = findApiPathCache.get(curr);
+      if (cached !== undefined) {
+        addToCache(start, curr, cached);
+        return cached;
+      }
+
       const candidate = ppath.join(curr, `.pnp.js` as Filename);
-      if (xfs.existsSync(candidate) && xfs.statSync(candidate).isFile())
+      if (xfs.existsSync(candidate) && xfs.statSync(candidate).isFile()) {
+        addToCache(start, curr, candidate);
         return candidate;
+      }
+
+      const cjsCandidate = ppath.join(curr, `.pnp.cjs` as Filename);
+      if (xfs.existsSync(cjsCandidate) && xfs.statSync(cjsCandidate).isFile()) {
+        addToCache(start, curr, cjsCandidate);
+        return cjsCandidate;
+      }
 
       next = ppath.dirname(curr);
     } while (curr !== PortablePath.root);
 
+    addToCache(start, curr, null);
     return null;
   }
 
@@ -89,7 +121,7 @@ export function makeManager(pnpapi: PnpApi, opts: MakeManagerOptions) {
 
     if (typeof parent.pnpApiPath === `undefined`) {
       if (parent.filename !== null) {
-        return findApiPathFor(parent.filename);
+        return parent.pnpApiPath = findApiPathFor(parent.filename);
       } else {
         return initialApiPath;
       }

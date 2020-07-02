@@ -10,6 +10,13 @@ export default class NewPluginCommand extends Command {
 
   static usage: Usage = Command.Usage({
     description: `generate the template for a new plugin`,
+    details: `
+      This command generates a new plugin based on the template.
+    `,
+    examples: [[
+      `Create a new plugin`,
+      `$0 new plugin yarn-plugin-hello-world`,
+    ]],
   });
 
   @Command.Path(`new`, `plugin`)
@@ -60,11 +67,11 @@ export default class NewPluginCommand extends Command {
         [`@yarnpkg/core`]: require(`@yarnpkg/builder/package.json`).dependencies[`@yarnpkg/core`],
         [`@yarnpkg/builder`]: `^${require(`@yarnpkg/builder/package.json`).version}`,
         [`@types/node`]: `^${process.versions.node.split(`.`)[0]}.0.0`,
-        [`clipanion`]: require(`@yarnpkg/builder/package.json`).dependencies[`clipanion`],
-        [`typescript`]: `^3.3.3333`,
+        [`clipanion`]: require(`@yarnpkg/builder/package.json`).dependencies.clipanion,
+        [`typescript`]: require(`@yarnpkg/builder/package.json`).devDependencies.typescript,
       },
       scripts: {
-        build: `yarn builder build plugin`,
+        build: `builder build plugin`,
       },
     }, null, 2));
 
@@ -72,8 +79,8 @@ export default class NewPluginCommand extends Command {
       compilerOptions: {
         experimentalDecorators: true,
         module: `commonjs`,
-        target: `es2017`,
-        lib: [`es2017`],
+        target: `es2018`,
+        lib: [`es2018`],
       },
       include: [
         `sources/**/*.ts`,

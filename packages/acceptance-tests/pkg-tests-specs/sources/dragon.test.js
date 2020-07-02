@@ -1,8 +1,8 @@
-import {xfs} from '@yarnpkg/fslib';
+import {xfs, npath} from '@yarnpkg/fslib';
 
 const {
   fs: {writeFile, writeJson},
-} = require('pkg-tests-core');
+} = require(`pkg-tests-core`);
 
 // Here be dragons. The biggest and baddest tests, that just can't be described in a single line of summary. Because
 // of this, they each must be clearly documented and explained.
@@ -348,6 +348,100 @@ describe(`Dragon tests`, () => {
 
         await run(`install`);
       },
+    ),
+  );
+
+  test(`it should pass the dragon test 7`,
+    makeTemporaryEnv(
+      {
+        private: true,
+        dependencies: {
+          [`dragon-test-7-a`]: `1.0.0`,
+          [`dragon-test-7-d`]: `1.0.0`,
+          [`dragon-test-7-b`]: `2.0.0`,
+          [`dragon-test-7-c`]: `3.0.0`,
+        },
+      },
+      async ({path, run, source}) => {
+        // node-modules linker should support hoisting the same package in different places of the tree in different ways
+        //
+        // . -> A -> B@X -> C@X
+        //        -> C@Y
+        //   -> D -> B@X -> C@X
+        //   -> B@Y
+        //   -> C@Z
+        // should be hoisted to:
+        // . -> A -> B@X -> C@X
+        //        -> C@Y
+        //   -> D -> B@X
+        //        -> C@X
+        //   -> B@Y
+        //   -> C@Z
+        //
+        // Two B@X instances should be hoisted differently in the tree
+        await writeFile(npath.toPortablePath(`${path}/.yarnrc.yml`), `
+          nodeLinker: "node-modules"
+        `);
+
+        await expect(run(`install`)).resolves.toBeTruthy();
+
+        // All fixtures export/reexport `dragon-test-7-c` version, we expect that version 1.0.0 will be used by both `dragon-test-7-b` instances
+        await expect(source(`require('dragon-test-7-a') + ':' + require('dragon-test-7-d')`)).resolves.toEqual(`1.0.0:1.0.0`);
+
+        // C@X should not be hoisted from . -> A -> B@X
+        await expect(xfs.existsPromise(`${path}/node_modules/dragon-test-7-a/node_modules/dragon-test-7-b/node_modules/dragon-test-7-c`)).resolves.toBeTruthy();
+        // C@X should be hoisted from . -> D -> B@X
+        await expect(xfs.existsPromise(`${path}/node_modules/dragon-test-7-d/node_modules/dragon-test-7-b/node_modules`)).resolves.toBeFalsy();
+      }
+    ),
+  );
+
+  test(`it should pass the dragon test 8`,
+    makeTemporaryEnv(
+      {
+        private: true,
+        dependencies: {
+          [`dragon-test-8-a`]: `1.0.0`,
+          [`dragon-test-8-b`]: `1.0.0`,
+          [`dragon-test-8-c`]: `1.0.0`,
+          [`dragon-test-8-d`]: `1.0.0`,
+        },
+      },
+      async ({path, run, source}) => {
+        // We want to deduplicate all the virtual instances as long as their
+        // effective dependencies are the same. However, in order to do that,
+        // we need to run the deduping recursively since deduping one package
+        // may lead to others being candidates for deduping.
+        //
+        // Reproducing the edge case we ran into is a bit tricky and heavily
+        // connected to our own algorithm. We need the following tree:
+        //
+        // . -> A -> B --> C
+        //             --> D
+        //        -> C
+        //        -> D --> C
+        //   -> B --> C
+        //        --> D
+        //   -> C
+        //   -> D --> C
+        //
+        // In this situation, the Yarn resolution will first traverse and
+        // register A, B, C, D. B and D will both get virtual instances. Then
+        // the traversal will leave the A branch and iterate on the remaining
+        // nodes in B, C, D. At this point B will still reference the
+        // non-deduplicated version of D (since we haven't traversed the second
+        // node yet), so the algorithm will leave it as it is. It's only once
+        // we keep iterating that D is deduplicated and thus we can deduplicate
+        // B as well.
+        //
+        // Note that this is also very dependent on the package names. If B was
+        // called E, this case wouldn't happen because D would be deduplicated
+        // first.
+
+        await expect(run(`install`)).resolves.toBeTruthy();
+
+        await expect(source(`require('dragon-test-8-a').dependencies['dragon-test-8-b'] === require('dragon-test-8-b')`)).resolves.toEqual(true);
+      }
     ),
   );
 });
